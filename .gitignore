@@ -1,0 +1,17 @@
+
+# Secret API keys and environment variables
+.env
+.env.*
+
+# Python virtual environment
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Local agent conversation memory
+agent_memory.db
+
+# macOS files
+.DS_Store
