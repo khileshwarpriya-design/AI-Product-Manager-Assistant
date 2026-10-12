@@ -4,6 +4,10 @@ An AI-powered assistant designed to explore how Generative AI and agentic workfl
 
 Built as a hands-on learning project, this application combines product thinking with practical implementation using Python, LangGraph, Groq, and Streamlit.
 
+## 📸 Application Screenshot
+
+![AI Product Manager Assistant](ai-agent-screenshot.png)
+
 ## 🎯 Problem Statement
 
 Product Managers regularly work on PRDs, user stories, feature prioritization, and product success metrics. This project explores how an AI assistant can help structure and accelerate these workflows through conversational interaction and tool-enabled reasoning.
