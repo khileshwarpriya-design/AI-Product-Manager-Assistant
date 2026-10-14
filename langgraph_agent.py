@@ -1,32 +1,30 @@
-from dotenv import load_dotenv
+"""LangGraph agent powering the AI Product Manager Assistant.
 
-load_dotenv()
-
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, MessagesState, START
-from langgraph.prebuilt import ToolNode, tools_condition
+Defines the conversational graph (LLM node + tool node), the system
+prompt that scopes the assistant to product-management topics, and the
+``ask_agent`` entry point used by the Streamlit UI.
+"""
 
 import sqlite3
+from typing import TypedDict
+
+from dotenv import load_dotenv
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import calculator, text_length
 
+load_dotenv()
 
-# 1. Create the LLM
-llm = ChatGroq(
-    model="openai/gpt-oss-20b",
-    temperature=0
-)
+MODEL_NAME = "gpt-4o-mini"
+MEMORY_DB_PATH = "agent_memory.db"
+MAX_HISTORY_MESSAGES = 10
+DEFAULT_THREAD_ID = "default-thread"
 
-
-# 2. Give tools to the LLM
-tools = [calculator, text_length]
-
-llm_with_tools = llm.bind_tools(tools)
-
-#system message
-system_message = SystemMessage(
+SYSTEM_PROMPT = SystemMessage(
     content="""
 You are an AI Product Manager Assistant.
 
@@ -68,96 +66,82 @@ Boundaries:
 - If a request is unrelated to these areas, politely explain that your primary role is as an AI Product Manager Assistant.
 """
 )
-# 3. Create the LLM node
-def call_model(state: MessagesState):
-    recent_messages = state["messages"][-10:]
 
-    messages = [
-        system_message
-    ] + recent_messages
 
+class ToolCall(TypedDict):
+    name: str
+    args: dict
+
+
+class AgentResponse(TypedDict):
+    answer: str
+    tool_calls: list[ToolCall]
+
+
+tools = [calculator, text_length]
+
+llm = ChatOpenAI(model=MODEL_NAME, temperature=0)
+llm_with_tools = llm.bind_tools(tools)
+
+
+def call_model(state: MessagesState) -> dict:
+    """LLM node: answers using the system prompt plus recent history."""
+    recent_messages = state["messages"][-MAX_HISTORY_MESSAGES:]
+    messages = [SYSTEM_PROMPT] + recent_messages
     response = llm_with_tools.invoke(messages)
-
-    return {
-        "messages": [response]
-    }
+    return {"messages": [response]}
 
 
-# 4. Create the graph
-builder = StateGraph(MessagesState)
+def _build_graph(checkpointer: SqliteSaver):
+    builder = StateGraph(MessagesState)
+
+    builder.add_node("llm", call_model)
+    builder.add_node("tools", ToolNode(tools))
+
+    builder.add_edge(START, "llm")
+    builder.add_conditional_edges("llm", tools_condition)
+    builder.add_edge("tools", "llm")
+
+    return builder.compile(checkpointer=checkpointer)
 
 
-# 5. Add the LLM node
-builder.add_node("llm", call_model)
+# A single, long-lived SQLite connection backs conversational memory so
+# that chat history survives across Streamlit re-runs and app restarts.
+_connection = sqlite3.connect(MEMORY_DB_PATH, check_same_thread=False)
+_memory = SqliteSaver(_connection)
+graph = _build_graph(_memory)
 
 
-# 6. Add the tool node
-builder.add_node("tools", ToolNode(tools))
+def _extract_tool_calls(messages: list[BaseMessage]) -> list[ToolCall]:
+    """Collect every tool call made by the assistant during this turn."""
+    tool_calls: list[ToolCall] = []
+
+    for message in messages:
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            tool_calls.append(
+                {
+                    "name": tool_call.get("name", "Unknown tool"),
+                    "args": tool_call.get("args", {}),
+                }
+            )
+
+    return tool_calls
 
 
-# 7. Start → LLM
-builder.add_edge(START, "llm")
+def ask_agent(user_input: str, thread_id: str = DEFAULT_THREAD_ID) -> AgentResponse:
+    """Run one turn of the conversation and return the answer + tool calls.
 
-
-# 8. Decide whether to use a tool
-builder.add_conditional_edges(
-    "llm",
-    tools_condition,
-)
-
-
-# 9. Tool → LLM
-builder.add_edge("tools", "llm")
-
-
-# 10. Create persistent memory
-conn = sqlite3.connect(
-    "agent_memory.db",
-    check_same_thread=False
-)
-
-memory = SqliteSaver(conn)
-
-
-# 11. Compile graph with memory
-graph = builder.compile(
-    checkpointer=memory
-)
-
-
-# 12. Start conversation
-
-
-def ask_agent(user_input, thread_id="khileshwar-1"):
+    ``thread_id`` scopes conversational memory: messages sharing the same
+    thread id are treated as one continuous conversation.
+    """
     result = graph.invoke(
-        {
-            "messages": [
-                HumanMessage(content=user_input)
-            ]
-        },
-        config={
-            "configurable": {
-                "thread_id": thread_id
-            }
-        }
+        {"messages": [HumanMessage(content=user_input)]},
+        config={"configurable": {"thread_id": thread_id}},
     )
 
     messages = result["messages"]
 
-    # Find tool calls made by the AI
-    tool_calls = []
-
-    for message in messages:
-        if getattr(message, "tool_calls", None):
-            for tool_call in message.tool_calls:
-                tool_calls.append({
-                    "name": tool_call.get("name", "Unknown tool"),
-                    "args": tool_call.get("args", {})
-                })
-
-    # Return the answer and tool-call details
     return {
         "answer": messages[-1].content,
-        "tool_calls": tool_calls
+        "tool_calls": _extract_tool_calls(messages),
     }
-

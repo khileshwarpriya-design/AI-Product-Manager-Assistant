@@ -12,6 +12,8 @@ __pycache__/
 
 # Local agent conversation memory
 agent_memory.db
+agent_memory.db-shm
+agent_memory.db-wal
 
 # macOS files
 .DS_Store
